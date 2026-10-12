@@ -39,6 +39,8 @@ class Sprint2TestCase(unittest.TestCase):
 
         class TestConfig(Config):
             TESTING = True
+            RATELIMIT_ENABLED = False
+            DELIVERY_FEE_FROM_CLIENT = True
             SQLALCHEMY_DATABASE_URI = (
                 f"sqlite:///{Path(self.tempdir.name) / 'test.db'}"
             )
@@ -147,7 +149,7 @@ class Sprint2TestCase(unittest.TestCase):
             json={
                 "address": "Rua Cliente, 10",
                 "delivery_fee": 7,
-                "payment_method": "pix",
+                "payment_method": "cash",
             },
             headers=customer,
         )
@@ -255,7 +257,7 @@ class Sprint2TestCase(unittest.TestCase):
             "/api/checkout",
             json={
                 "address": "Rua Cliente, 10",
-                "payment_method": "pix",
+                "payment_method": "cash",
                 "delivery_fee": 6,
                 "delivery_fees": {str(second_store_id): 9},
             },

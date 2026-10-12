@@ -1,0 +1,26 @@
+name: Backend checks
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: syncroway_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Validate PostgreSQL migrations and schema
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/syncroway_test
+        run: |
+          python -m flask --app run:app db upgrade
+          python -m flask --app run:app db check

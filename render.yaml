@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: syncroway-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    preDeployCommand: python -m flask --app run:app db upgrade
+    startCommand: gunicorn run:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 60 --access-logfile - --error-logfile -
+    healthCheckPath: /api/ready
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.12
+      - key: PROXY_HOPS
+        value: '1'
+      - key: APP_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: RATELIMIT_STORAGE_URI
+        sync: false
+      - key: DELIVERY_FEE_PER_STORE
+        value: '7.00'
+      - key: ASAAS_ENABLED
+        value: 'false'

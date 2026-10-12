@@ -1,6 +1,8 @@
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
+from hashlib import sha256
+from email_validator import validate_email, EmailNotValidError
 from zoneinfo import ZoneInfo
 
 from flask import Blueprint, current_app, g, jsonify, request
@@ -10,7 +12,7 @@ from sqlalchemy.orm import joinedload
 from werkzeug.security import generate_password_hash
 
 from ..auth import _decode_token, create_tokens, require_auth, require_roles
-from ..extensions import db
+from ..extensions import db, limiter
 from ..models import (
     Appointment,
     AppointmentStatus,
@@ -43,6 +45,13 @@ from ..models import (
 from ..utils import as_bool, iso_utc, money, parse_decimal, utcnow
 
 api_bp = Blueprint("api", __name__)
+
+
+def auth_limit_key():
+    data = request.get_json(silent=True)
+    email = str(data.get("email", "")) if isinstance(data, dict) else ""
+    return "account:" + sha256(email.strip().lower().encode()).hexdigest()
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -257,6 +266,7 @@ def order_summary_json(order):
         "type": order.type,
         "status": order.status,
         "payment_status": order.payment_status,
+        "payment_deadline": iso_utc(order.payment_release_at),
         "payment_method": order.payment_method,
         "subtotal": money(order.subtotal),
         "delivery_fee": money(order.delivery_fee),
@@ -414,6 +424,8 @@ def public_config():
         "delivery_fee_per_store": str(
             current_app.config.get("DELIVERY_FEE_PER_STORE", "0")
         ),
+        "payment_methods": (["pix", "card_online", "cash", "card_on_delivery"]
+                            if current_app.config.get("ASAAS_ENABLED") else ["cash", "card_on_delivery"]),
         "api_prefix": current_app.config.get("API_PREFIX", "/api"),
     })
 
@@ -423,11 +435,19 @@ def public_config():
 # ═══════════════════════════════════════════════════════════════
 
 @api_bp.post("/auth/register")
+@limiter.limit("5 per minute")
 def register():
     data = request.get_json(silent=True) or {}
     if not all(str(data.get(k, "")).strip() for k in ("name", "email", "password")):
         return jsonify({"error": "name, email e password são obrigatórios"}), 400
-    email = data["email"].strip().lower()
+    if not all(isinstance(data.get(k), str) for k in ("name", "email", "password")):
+        return jsonify({"error": "name, email e password devem ser textos"}), 400
+    if len(data["name"]) > 120 or len(data["email"]) > 180 or len(data["password"]) > 256:
+        return jsonify({"error": "campo excede o tamanho permitido"}), 400
+    try:
+        email = validate_email(data["email"].strip(), check_deliverability=False).normalized.lower()
+    except EmailNotValidError:
+        return jsonify({"error": "e-mail inválido"}), 400
     if len(str(data["password"])) < 8:
         return jsonify({"error": "password deve possuir ao menos 8 caracteres"}), 400
 
@@ -452,6 +472,8 @@ def register():
 
 
 @api_bp.post("/auth/login")
+@limiter.limit("10 per minute")
+@limiter.limit("10 per minute", key_func=auth_limit_key)
 def login():
     data = request.get_json(silent=True) or {}
     email = str(data.get("email", "")).strip().lower()
@@ -467,6 +489,7 @@ def login():
 
 
 @api_bp.post("/auth/refresh")
+@limiter.limit("30 per minute")
 def refresh_token():
     data = request.get_json(silent=True) or {}
     token_str = data.get("refresh_token")
@@ -773,7 +796,7 @@ def checkout():
     data = request.get_json(silent=True) or {}
     address = str(data.get("address", "")).strip()
     payment_method = str(data.get("payment_method",
-                                  PaymentMethod.PIX)).strip().lower()
+                                  PaymentMethod.CASH)).strip().lower()
 
     if not address:
         return jsonify({"error": "endereço é obrigatório"}), 400
@@ -784,8 +807,12 @@ def checkout():
     if payment_method not in valid_payment_methods:
         return jsonify({"error": "forma de pagamento inválida"}), 400
 
-    # Em modo gateway o navegador não define taxa de entrega.
-    if current_app.config.get("ASAAS_ENABLED"):
+    if payment_method in {"pix", "card_online"} and not current_app.config.get("ASAAS_ENABLED"):
+        return jsonify({"error": "Pagamento online indisponível; escolha pagamento na entrega"}), 409
+
+    # Frete sempre pertence ao servidor. Compatibilidade explícita só em testes/dev.
+    if (current_app.config.get("APP_ENV") == "production"
+            or not current_app.config.get("DELIVERY_FEE_FROM_CLIENT")):
         configured_fee = Decimal(str(
             current_app.config.get("DELIVERY_FEE_PER_STORE", "0")
         ))
@@ -814,6 +841,8 @@ def checkout():
     except (TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
 
+    # Serialize double-clicks/retries on the same customer's cart.
+    db.session.query(User.id).filter_by(id=g.current_user.id).with_for_update().first()
     cart = get_or_create_cart(g.current_user.id)
     cart_items = list(cart.items)
     if not cart_items:
@@ -863,6 +892,8 @@ def checkout():
                 status=OrderStatus.PENDING,
                 payment_status=PaymentStatus.PENDING,
                 payment_method=payment_method,
+                payment_release_at=(utcnow() + timedelta(minutes=current_app.config["ORDER_PAYMENT_MINUTES"])
+                                    if payment_method in {"pix", "card_online"} else None),
                 delivery_fee=store_delivery_fee,
                 address=address,
                 notes=data.get("notes"),
@@ -2039,6 +2070,8 @@ def admin_settle_transaction(transaction_id):
         return jsonify({
             "error": "somente transações pendentes podem ser liquidadas"
         }), 409
+    if transaction.order and transaction.order.payment_status != PaymentStatus.PAID:
+        return jsonify({"error": "liquidação exige pagamento confirmado"}), 409
     if transaction.beneficiary == "driver":
         delivery = transaction.order.delivery if transaction.order else None
         if not delivery or delivery.status != DeliveryStatus.DELIVERED:
@@ -2223,9 +2256,12 @@ def driver_dashboard():
             DeliveryStatus.PICKED_UP,
         ])
     ).all()
-    available = Delivery.query.filter_by(
-        driver_id=None, status=DeliveryStatus.AWAITING_DRIVER
-    ).order_by(Delivery.created_at).all()
+    available = Delivery.query.join(Order).filter(
+        Delivery.driver_id.is_(None), Delivery.status == DeliveryStatus.AWAITING_DRIVER,
+        Order.status != OrderStatus.CANCELLED,
+        or_(Order.payment_method.in_(["cash", "card_on_delivery"]),
+            Order.payment_status == PaymentStatus.PAID),
+    ).order_by(Delivery.created_at).limit(100).all()
     completed_query = Delivery.query.filter_by(
         driver_id=g.current_user.id, status=DeliveryStatus.DELIVERED
     )
