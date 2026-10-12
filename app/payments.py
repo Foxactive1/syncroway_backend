@@ -22,7 +22,7 @@ from .models import (
     Delivery, DeliveryStatus, Order, OrderItem, OrderStatus, PaymentStatus,
     Store, Transaction, TransactionStatus, TransactionType, UserRole,
 )
-from .utils import money
+from .utils import money, utcnow, as_bool
 
 
 class GatewayError(Exception):
@@ -51,12 +51,8 @@ def _api(method, path, payload=None):
         with urlopen(req, timeout=15) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        try:
-            snippet = error.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            snippet = ""
         current_app.logger.warning(
-            "Asaas HTTP %s em %s — body: %s", error.code, path, snippet
+            "Asaas HTTP %s em %s", error.code, path
         )
         raise GatewayError(f"Gateway retornou HTTP {error.code}") from error
     except (URLError, TimeoutError) as error:
@@ -142,7 +138,7 @@ def register_payment_routes(bp):
             db.session.add(row)
         row.wallet_id = wallet
         # Deve ser ativada SOMENTE após operador verificar o dono da carteira.
-        row.enabled = bool(data.get("verified", False))
+        row.enabled = as_bool(data.get("verified"))
         try:
             db.session.commit()
         except IntegrityError:
@@ -168,6 +164,8 @@ def register_payment_routes(bp):
             return jsonify({"error": "forma de pagamento offline"}), 409
         if order.total_amount <= 0:
             return jsonify({"error": "valor do pedido inválido"}), 409
+        if order.payment_release_at and order.payment_release_at < utcnow():
+            return jsonify({"error": "Prazo para iniciar pagamento expirado"}), 409
         existing = AsaasPayment.query.filter_by(order_id=order.id).first()
         if existing:
             if existing.external_id:
@@ -229,7 +227,8 @@ def register_payment_routes(bp):
             })
             pay.external_id = remote["id"]
             pay.invoice_url = remote.get("invoiceUrl")
-            pay.state = "pending"
+            db.session.refresh(order)
+            pay.state = "paid" if order.payment_status == PaymentStatus.PAID else "pending"
             db.session.commit()
             current_app.logger.info(
                 "Asaas cobrança criada order=%s pay=%s external=%s",
@@ -310,8 +309,13 @@ def register_payment_routes(bp):
             id=eid, event_type=event, payment_id=pid, payload=payload,
         ))
         pay = AsaasPayment.query.filter_by(external_id=pid).first() if pid else None
+        if not pay and str(remote.get("externalReference", "")).startswith("sw-order-"):
+            # Gateway callback may race the local external_id commit. Retry it;
+            # never acknowledge and permanently discard a business event.
+            db.session.rollback()
+            return jsonify({"error": "cobrança ainda não conciliada; repetir evento"}), 503
         if pay:
-            order = db.session.get(Order, pay.order_id)
+            order = Order.query.filter_by(id=pay.order_id).with_for_update().first()
             if event in {"PAYMENT_RECEIVED", "PAYMENT_CONFIRMED"}:
                 # Não restaura estado refunded em callbacks fora de ordem.
                 if order.payment_status not in {PaymentStatus.REFUNDED,
@@ -319,6 +323,10 @@ def register_payment_routes(bp):
                     order.payment_status = PaymentStatus.PAID
                 if order.payment_status == PaymentStatus.PAID:
                     pay.state = "paid"
+                    if order.status == OrderStatus.CANCELLED:
+                        pay.state = "paid_after_cancel_review"
+                        # Never revive a cancelled order whose stock was released.
+                        current_app.logger.error("Pagamento tardio em pedido cancelado %s", order.id)
             elif event in {"PAYMENT_REFUNDED", "PAYMENT_PARTIALLY_REFUNDED"}:
                 # Refunds parciais exigem reconciliação financeira manual.
                 if event == "PAYMENT_REFUNDED":
@@ -328,8 +336,13 @@ def register_payment_routes(bp):
                     pay.state = "partial_refund_review"
             elif event in {"PAYMENT_DELETED", "PAYMENT_OVERDUE"}:
                 if order.payment_status == PaymentStatus.PENDING:
-                    pay.state = ("expired" if event == "PAYMENT_OVERDUE"
-                                 else "cancelled")
+                    pay.state = ("overdue" if event == "PAYMENT_OVERDUE" else "cancelled")
+                    if event == "PAYMENT_DELETED":
+                        from .operations import cancel_unpaid_order
+                        try:
+                            cancel_unpaid_order(order, "Cobrança removida no gateway")
+                        except ValueError:
+                            pay.state = "cancel_review"
             elif event == "PAYMENT_SPLIT_DONE":
                 # Não assume que toda wallet foi paga; concilie splitId/valores.
                 pass

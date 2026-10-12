@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+from .utils import as_bool, parse_decimal
 
 load_dotenv()
 
@@ -47,6 +48,17 @@ class Config:
 ]
     API_PREFIX = os.getenv("API_PREFIX", "/api")
     DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "America/Sao_Paulo")
+    ASAAS_ENABLED = as_bool(os.getenv("ASAAS_ENABLED"))
+    ASAAS_ENV = os.getenv("ASAAS_ENV", "sandbox").strip().lower()
+    ASAAS_API_KEY = os.getenv("ASAAS_API_KEY", "")
+    ASAAS_WEBHOOK_TOKEN = os.getenv("ASAAS_WEBHOOK_TOKEN", "")
+    DELIVERY_FEE_PER_STORE = str(parse_decimal(os.getenv("DELIVERY_FEE_PER_STORE", "0"), "frete", maximum=9999999999))
+    # Legacy local demos only. Never honored in production.
+    DELIVERY_FEE_FROM_CLIENT = False
+    ORDER_PAYMENT_MINUTES = int(os.getenv("ORDER_PAYMENT_MINUTES", "30"))
+    RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
+    PROXY_HOPS = int(os.getenv("PROXY_HOPS", "0"))
+    RATELIMIT_ENABLED = True
     JSON_SORT_KEYS = False
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
 
@@ -56,3 +68,16 @@ class Config:
             raise RuntimeError("SECRET_KEY deve ser configurada em produção")
         if len(cls.SECRET_KEY) < 32:
             raise RuntimeError("SECRET_KEY deve possuir ao menos 32 caracteres")
+        if cls.APP_ENV == "production" and cls.SQLALCHEMY_DATABASE_URI.startswith("sqlite"):
+            raise RuntimeError("Produção exige PostgreSQL; configure DATABASE_URL")
+        if cls.APP_ENV == "production" and cls.RATELIMIT_STORAGE_URI == "memory://":
+            raise RuntimeError("Configure RATELIMIT_STORAGE_URI com Redis em produção")
+        if cls.PROXY_HOPS not in (0, 1):
+            raise RuntimeError("PROXY_HOPS deve ser 0 ou 1")
+        if cls.ORDER_PAYMENT_MINUTES < 1:
+            raise RuntimeError("ORDER_PAYMENT_MINUTES deve ser positivo")
+        if cls.ASAAS_ENABLED:
+            if cls.ASAAS_ENV not in {"sandbox", "production"}:
+                raise RuntimeError("ASAAS_ENV inválido")
+            if not cls.ASAAS_API_KEY or len(cls.ASAAS_WEBHOOK_TOKEN) < 32:
+                raise RuntimeError("Configure ASAAS_API_KEY e ASAAS_WEBHOOK_TOKEN (32+ caracteres)")

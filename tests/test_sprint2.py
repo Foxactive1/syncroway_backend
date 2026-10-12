@@ -17,6 +17,8 @@ class Sprint2TestCase(unittest.TestCase):
 
         class TestConfig(Config):
             TESTING = True
+            RATELIMIT_ENABLED = False
+            DELIVERY_FEE_FROM_CLIENT = True
             SQLALCHEMY_DATABASE_URI = f"sqlite:///{Path(self.tempdir.name) / 'test.db'}"
             SECRET_KEY = "test-secret-key-with-at-least-32-bytes"
 
@@ -52,7 +54,7 @@ class Sprint2TestCase(unittest.TestCase):
     def test_inventory_finance_privacy_and_driver_earnings(self):
         customer = self.auth("cliente@test.local")
         self.assertEqual(self.client.post("/api/cart/items", json={"product_id": 1, "quantity": 1}, headers=customer).status_code, 201)
-        checkout = self.client.post("/api/checkout", json={"address": "Rua Cliente, 10", "delivery_fee": 7, "payment_method": "pix"}, headers=customer)
+        checkout = self.client.post("/api/checkout", json={"address": "Rua Cliente, 10", "delivery_fee": 7, "payment_method": "cash"}, headers=customer)
         self.assertEqual(checkout.status_code, 201)
 
         merchant = self.auth("loja@test.local")

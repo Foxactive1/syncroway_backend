@@ -17,6 +17,7 @@ psycopg[binary]>=3.2,<4
 
 # ─── Produção ─────────────────────────────────
 gunicorn>=23,<24
+redis>=5,<7
 Flask-Limiter>=3.9,<4
 
 # ─── Testes (dev) ─────────────────────────────
