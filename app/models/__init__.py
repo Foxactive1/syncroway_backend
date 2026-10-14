@@ -1087,3 +1087,17 @@ class MediaAsset(db.Model, TimestampMixin):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class MediaAssetUsage(TimestampMixin, db.Model):
+    """Vínculo de uma imagem da biblioteca a uma entidade do marketplace."""
+    __tablename__ = "media_asset_usages"
+    __table_args__ = (db.UniqueConstraint("entity_type", "entity_id", "role", name="uq_media_usage_entity_role"),)
+
+    id = db.Column(db.Integer, primary_key=True)
+    asset_id = db.Column(db.Integer, db.ForeignKey("media_assets.id", ondelete="CASCADE"), nullable=False, index=True)
+    entity_type = db.Column(db.String(30), nullable=False, index=True)
+    entity_id = db.Column(db.Integer, nullable=False, index=True)
+    role = db.Column(db.String(30), nullable=False, default="primary")
+
+    asset = db.relationship("MediaAsset", backref=db.backref("usages", cascade="all, delete-orphan", lazy=True))
