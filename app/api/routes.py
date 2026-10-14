@@ -22,6 +22,7 @@ from ..models import (
     Delivery,
     DeliveryStatus,
     MediaAsset,
+    MediaAssetUsage,
     DriverProfile,
     Order,
     OrderItem,
@@ -2735,6 +2736,53 @@ def admin_create_media_asset():
     return jsonify(asset.to_dict()), 201
 
 
+
+
+
+@api_bp.post("/admin/media-assets/<int:asset_id>/usages")
+@require_roles(UserRole.ADMIN)
+def admin_link_media_asset_usage(asset_id):
+    asset = db.session.get(MediaAsset, asset_id)
+    if not asset or not asset.active:
+        return jsonify({"error": "Imagem ativa não encontrada."}), 404
+    data = request.get_json(silent=True) or {}
+    entity_type = str(data.get("entity_type", "")).strip().lower()
+    try:
+        entity_id = int(data.get("entity_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Informe o ID numérico do registro."}), 400
+    if entity_type not in {"product", "service", "store"}:
+        return jsonify({"error": "Tipo deve ser product, service ou store."}), 400
+    model = {"product": Product, "service": Service, "store": Store}[entity_type]
+    entity = db.session.get(model, entity_id)
+    if not entity:
+        return jsonify({"error": "Registro de destino não encontrado."}), 404
+    role = str(data.get("role", "primary")).strip().lower() or "primary"
+    if role not in {"primary", "thumbnail", "banner"}:
+        return jsonify({"error": "Papel de imagem inválido."}), 400
+    usage = MediaAssetUsage.query.filter_by(entity_type=entity_type, entity_id=entity_id, role=role).first()
+    if usage:
+        usage.asset_id = asset.id
+    else:
+        usage = MediaAssetUsage(asset_id=asset.id, entity_type=entity_type, entity_id=entity_id, role=role)
+        db.session.add(usage)
+    # Compatibilidade: telas/API atuais continuam lendo image_url.
+    if role == "primary":
+        entity.image_url = asset.image_url
+    db.session.commit()
+    return jsonify({"usage_id": usage.id, "asset_id": asset.id, "entity_type": entity_type, "entity_id": entity_id, "role": role, "image_url": asset.image_url}), 201
+
+
+def _sync_media_asset_usages(asset):
+    for usage in asset.usages:
+        if usage.role != "primary":
+            continue
+        model = {"product": Product, "service": Service, "store": Store}.get(usage.entity_type)
+        entity = db.session.get(model, usage.entity_id) if model else None
+        if entity:
+            entity.image_url = asset.image_url
+
+
 @api_bp.patch("/admin/media-assets/<int:asset_id>")
 @require_roles(UserRole.ADMIN)
 def admin_update_media_asset(asset_id):
@@ -2752,6 +2800,7 @@ def admin_update_media_asset(asset_id):
         if not _media_url_is_valid(url) or len(url) > 2048:
             return jsonify({"error": "Informe uma URL HTTPS válida para a imagem."}), 400
         asset.image_url = url
+        _sync_media_asset_usages(asset)
     if "category" in data:
         category = str(data["category"]).strip().lower()
         if not category or len(category) > 80:
