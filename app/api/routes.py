@@ -21,6 +21,7 @@ from ..models import (
     Category,
     Delivery,
     DeliveryStatus,
+    MediaAsset,
     DriverProfile,
     Order,
     OrderItem,
@@ -2657,6 +2658,134 @@ def provider_update_appointment(appointment_id):
         g.current_user.provider_profile.completed_jobs += 1
     db.session.commit()
     return jsonify({"id": appointment.id, "status": appointment.status})
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# BIBLIOTECA DE MÍDIA — URLs centralizadas e reutilizáveis
+# ═══════════════════════════════════════════════════════════════
+
+def _media_slug(value):
+    import re
+    import unicodedata
+    value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", value.lower())).strip("-")[:180] or "imagem"
+
+
+def _media_url_is_valid(value):
+    from urllib.parse import urlparse
+    parsed = urlparse(str(value or "").strip())
+    return parsed.scheme == "https" and bool(parsed.netloc) and not any(c.isspace() for c in str(value))
+
+
+@api_bp.get("/admin/media-assets")
+@require_roles(UserRole.ADMIN)
+def admin_media_assets():
+    query = MediaAsset.query
+    category = request.args.get("category", "").strip().lower()
+    search = request.args.get("q", "").strip()
+    active = request.args.get("active", "true").strip().lower()
+    if category:
+        query = query.filter(func.lower(MediaAsset.category) == category)
+    if active in {"true", "1", "yes"}:
+        query = query.filter_by(active=True)
+    elif active in {"false", "0", "no"}:
+        query = query.filter_by(active=False)
+    if search:
+        term = f"%{search[:100]}%"
+        query = query.filter(or_(MediaAsset.name.ilike(term), MediaAsset.slug.ilike(term), MediaAsset.category.ilike(term)))
+    rows = query.order_by(MediaAsset.is_default.desc(), MediaAsset.created_at.desc()).limit(250).all()
+    return jsonify({"items": [item.to_dict() for item in rows], "total": len(rows)})
+
+
+@api_bp.post("/admin/media-assets")
+@require_roles(UserRole.ADMIN)
+def admin_create_media_asset():
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    image_url = str(data.get("image_url", "")).strip()
+    category = str(data.get("category", "geral")).strip().lower()
+    if not name or len(name) > 160:
+        return jsonify({"error": "Informe um nome de até 160 caracteres."}), 400
+    if not _media_url_is_valid(image_url) or len(image_url) > 2048:
+        return jsonify({"error": "Informe uma URL HTTPS válida para a imagem."}), 400
+    if not category or len(category) > 80:
+        return jsonify({"error": "Categoria inválida."}), 400
+    tags = data.get("tags") or []
+    if not isinstance(tags, list) or any(not isinstance(tag, str) for tag in tags):
+        return jsonify({"error": "tags deve ser uma lista de textos."}), 400
+    tags = list(dict.fromkeys(tag.strip().lower()[:40] for tag in tags if tag.strip()))[:20]
+    slug = _media_slug(data.get("slug") or name)
+    base_slug, suffix = slug, 2
+    while MediaAsset.query.filter_by(slug=slug).first():
+        slug = f"{base_slug[:170]}-{suffix}"
+        suffix += 1
+    asset = MediaAsset(
+        name=name, slug=slug, image_url=image_url, category=category,
+        tags=tags, alt_text=str(data.get("alt_text") or name).strip()[:300] or None,
+        source=str(data.get("source") or "external").strip()[:80],
+        license=str(data.get("license") or "").strip()[:160] or None,
+        is_default=bool(data.get("is_default", False)), active=True,
+        created_by=g.current_user.id,
+    )
+    if asset.is_default:
+        MediaAsset.query.filter_by(category=category, is_default=True).update({"is_default": False})
+    db.session.add(asset)
+    db.session.commit()
+    return jsonify(asset.to_dict()), 201
+
+
+@api_bp.patch("/admin/media-assets/<int:asset_id>")
+@require_roles(UserRole.ADMIN)
+def admin_update_media_asset(asset_id):
+    asset = db.session.get(MediaAsset, asset_id)
+    if not asset:
+        return jsonify({"error": "Imagem não encontrada."}), 404
+    data = request.get_json(silent=True) or {}
+    if "name" in data:
+        name = str(data["name"]).strip()
+        if not name or len(name) > 160:
+            return jsonify({"error": "Nome inválido."}), 400
+        asset.name = name
+    if "image_url" in data:
+        url = str(data["image_url"]).strip()
+        if not _media_url_is_valid(url) or len(url) > 2048:
+            return jsonify({"error": "Informe uma URL HTTPS válida para a imagem."}), 400
+        asset.image_url = url
+    if "category" in data:
+        category = str(data["category"]).strip().lower()
+        if not category or len(category) > 80:
+            return jsonify({"error": "Categoria inválida."}), 400
+        asset.category = category
+    if "tags" in data:
+        if not isinstance(data["tags"], list) or any(not isinstance(tag, str) for tag in data["tags"]):
+            return jsonify({"error": "tags deve ser uma lista de textos."}), 400
+        asset.tags = list(dict.fromkeys(tag.strip().lower()[:40] for tag in data["tags"] if tag.strip()))[:20]
+    for key, max_len in (("alt_text", 300), ("source", 80), ("license", 160)):
+        if key in data:
+            setattr(asset, key, str(data[key] or "").strip()[:max_len] or None)
+    if "active" in data:
+        asset.active = as_bool(data["active"])
+    if "is_default" in data:
+        if as_bool(data["is_default"]):
+            MediaAsset.query.filter(MediaAsset.category == asset.category, MediaAsset.id != asset.id).update({"is_default": False})
+            asset.is_default = True
+        else:
+            asset.is_default = False
+    db.session.commit()
+    return jsonify(asset.to_dict())
+
+
+@api_bp.delete("/admin/media-assets/<int:asset_id>")
+@require_roles(UserRole.ADMIN)
+def admin_archive_media_asset(asset_id):
+    asset = db.session.get(MediaAsset, asset_id)
+    if not asset:
+        return jsonify({"error": "Imagem não encontrada."}), 404
+    asset.active = False
+    asset.is_default = False
+    db.session.commit()
+    return jsonify({"id": asset.id, "active": False, "message": "Imagem arquivada."})
 
 
 # Endpoints Asaas registrados no MESMO blueprint /api.
