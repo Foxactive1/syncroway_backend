@@ -20,7 +20,7 @@ def upgrade():
         sa.Column("slug", sa.String(length=180), nullable=False),
         sa.Column("image_url", sa.Text(), nullable=False),
         sa.Column("category", sa.String(length=80), nullable=False, server_default="geral"),
-        sa.Column("tags", sa.JSON(), nullable=False, server_default="[]"),
+        sa.Column("tags", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")),
         sa.Column("alt_text", sa.String(length=300), nullable=True),
         sa.Column("source", sa.String(length=80), nullable=False, server_default="external"),
         sa.Column("license", sa.String(length=160), nullable=True),
