@@ -1059,3 +1059,31 @@ class AsaasWebhookEvent(db.Model):
     payment_id = db.Column(db.String(100), index=True)
     payload = db.Column(db.JSON, nullable=False)
     processed_at = db.Column(db.DateTime, default=utcnow, nullable=False)
+
+class MediaAsset(db.Model, TimestampMixin):
+    """Imagem reutilizável na biblioteca de mídia do marketplace."""
+    __tablename__ = "media_assets"
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(160), nullable=False, index=True)
+    slug = db.Column(db.String(180), nullable=False, unique=True, index=True)
+    image_url = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(80), nullable=False, default="geral", index=True)
+    tags = db.Column(db.JSON, nullable=False, default=list)
+    alt_text = db.Column(db.String(300), nullable=True)
+    source = db.Column(db.String(80), nullable=False, default="external")
+    license = db.Column(db.String(160), nullable=True)
+    is_default = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    active = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.name, "slug": self.slug,
+            "image_url": self.image_url, "category": self.category,
+            "tags": self.tags or [], "alt_text": self.alt_text,
+            "source": self.source, "license": self.license,
+            "is_default": self.is_default, "active": self.active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
