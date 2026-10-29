@@ -38,11 +38,10 @@ def create_app(config_object=Config):
     migrate.init_app(app, db)
     cors.init_app(
         app,
-        resources={
-            rf"{app.config['API_PREFIX']}/*": {
-                "origins": app.config["CORS_ORIGINS"],
-            }
-        },
+        origins=app.config["CORS_ORIGINS"],
+        supports_credentials=True,
+        allow_headers=["Content-Type", "Authorization", "Accept"],
+        methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
     )
 
     @app.before_request
