@@ -41,7 +41,7 @@ class Config:
         "CORS_ORIGINS",
         "http://localhost:5500,http://localhost:8000,http://localhost:8080,"
         "http://127.0.0.1:5500,http://127.0.0.1:8000,http://127.0.0.1:8080,"
-        "http://localhost:5173,"
+        "http://localhost:5173,","https://syncroway.com.br/","https://www.syncroway.com.br/
         "https://syncroway-marketplace.innovaideia2023.chatgpt.site",
     ).split(",")
     if value.strip()
